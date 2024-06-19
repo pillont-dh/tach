@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from itertools import chain
+from multiprocessing import Pool
+from typing import TYPE_CHECKING, Iterable
 
 from tach import errors
 from tach import filesystem as fs
@@ -122,6 +124,66 @@ class CheckResult:
     errors: list[BoundaryError] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
+    @classmethod
+    def merge_results(cls, results: Iterable[CheckResult]) -> CheckResult:
+        return cls(
+            errors=list(chain.from_iterable(result.errors for result in results)),
+            warnings=list(chain.from_iterable(result.warnings for result in results)),
+        )
+
+
+def chunk_file_paths(paths: list[str], chunks: int) -> Iterable[list[str]]:
+    return (paths[i::chunks] for i in range(chunks))
+
+
+def check_imports_in_paths(
+    file_paths: list[str], project_config: ProjectConfig, exclude_paths: list[str]
+) -> CheckResult:
+    module_tree = build_module_tree(project_config.modules)
+
+    # This informs the Rust extension ahead-of-time which paths are excluded.
+    # The extension builds regexes and uses them during `get_project_imports`
+    set_excluded_paths(exclude_paths=exclude_paths)
+    boundary_errors: list[BoundaryError] = []
+    warnings: list[str] = []
+    for file_path in file_paths:
+        mod_path = fs.file_to_module_path(file_path)
+        nearest_module = module_tree.find_nearest(mod_path)
+        if nearest_module is None:
+            continue
+
+        try:
+            project_imports = get_project_imports(
+                ".",
+                file_path,
+                ignore_type_checking_imports=project_config.ignore_type_checking_imports,
+            )
+        except SyntaxError:
+            warnings.append(f"Skipping '{file_path}' due to a syntax error.")
+            continue
+        except OSError:
+            warnings.append(f"Skipping '{file_path}' due to a file system error.")
+            continue
+        for project_import in project_imports:
+            check_error = check_import(
+                module_tree=module_tree,
+                import_mod_path=project_import[0],
+                file_nearest_module=nearest_module,
+                file_mod_path=mod_path,
+            )
+            if check_error is None:
+                continue
+
+            boundary_errors.append(
+                BoundaryError(
+                    file_path=file_path,
+                    import_mod_path=project_import[0],
+                    line_number=project_import[1],
+                    error_info=check_error,
+                )
+            )
+    return CheckResult(errors=boundary_errors, warnings=warnings)
+
 
 def check(
     root: str,
@@ -140,54 +202,26 @@ def check(
         else:
             exclude_paths = project_config.exclude
 
-        module_tree = build_module_tree(project_config.modules)
+        all_file_paths = list(
+            fs.walk_pyfiles(
+                ".",
+                exclude_paths=exclude_paths,
+            )
+        )
 
-        # This informs the Rust extension ahead-of-time which paths are excluded.
-        # The extension builds regexes and uses them during `get_project_imports`
-        set_excluded_paths(exclude_paths=exclude_paths or [])
-        boundary_errors: list[BoundaryError] = []
-        warnings: list[str] = []
-        for file_path in fs.walk_pyfiles(
-            ".",
-            exclude_paths=exclude_paths,
-        ):
-            mod_path = fs.file_to_module_path(file_path)
-            nearest_module = module_tree.find_nearest(mod_path)
-            if nearest_module is None:
-                continue
+        # TODO this needs to be tuned, or just made more efficient
+        # since it currently has a negative impact on small projects
+        num_cpus = os.cpu_count() or 4
+        num_workers = int(max(1.0, num_cpus * min(1.0, len(all_file_paths) / 10000.0)))
+        chunks = chunk_file_paths(all_file_paths, chunks=num_workers)
 
-            try:
-                project_imports = get_project_imports(
-                    ".",
-                    file_path,
-                    ignore_type_checking_imports=project_config.ignore_type_checking_imports,
-                )
-            except SyntaxError:
-                warnings.append(f"Skipping '{file_path}' due to a syntax error.")
-                continue
-            except OSError:
-                warnings.append(f"Skipping '{file_path}' due to a file system error.")
-                continue
-            for project_import in project_imports:
-                check_error = check_import(
-                    module_tree=module_tree,
-                    import_mod_path=project_import[0],
-                    file_nearest_module=nearest_module,
-                    file_mod_path=mod_path,
-                )
-                if check_error is None:
-                    continue
+        with Pool(processes=num_workers) as pool:
+            results = pool.starmap(
+                check_imports_in_paths,
+                [(file_paths, project_config, exclude_paths) for file_paths in chunks],
+            )
 
-                boundary_errors.append(
-                    BoundaryError(
-                        file_path=file_path,
-                        import_mod_path=project_import[0],
-                        line_number=project_import[1],
-                        error_info=check_error,
-                    )
-                )
-
-        return CheckResult(errors=boundary_errors, warnings=warnings)
+        return CheckResult.merge_results(results)
     finally:
         fs.chdir(cwd)
 
