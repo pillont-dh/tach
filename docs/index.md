@@ -1,6 +1,6 @@
 # Overview
 
-## What is tach?
+## What is Tach?
 Tach allows you to control dependencies between your Python modules.
 Modules can also define an explicit public interface to prevent deep coupling.
 
