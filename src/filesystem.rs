@@ -5,6 +5,7 @@ use std::io::Read;
 use std::path::StripPrefixError;
 use std::path::{Path, PathBuf, MAIN_SEPARATOR, MAIN_SEPARATOR_STR};
 
+use cached::proc_macro::cached;
 use globset::Glob;
 use globset::GlobSetBuilder;
 use walkdir::{DirEntry, WalkDir};
@@ -98,12 +99,17 @@ pub fn file_to_module_path(source_roots: &[PathBuf], file_path: &PathBuf) -> Res
     })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ResolvedModule {
     pub file_path: PathBuf,
     pub member_name: Option<String>,
 }
 
+#[cached(
+    ty = "cached::UnboundCache<String, Option<ResolvedModule>>",
+    create = "{ cached::UnboundCache::new() }",
+    convert = r#"{ format!("{:?}:{}", roots.iter().map(|root| root.as_ref().to_str().unwrap().to_string()).collect::<Vec<String>>(), mod_path) }"#
+)]
 pub fn module_to_file_path<P: AsRef<Path>>(roots: &[P], mod_path: &str) -> Option<ResolvedModule> {
     let mod_as_file_path = mod_path.replace('.', MAIN_SEPARATOR_STR);
     for root in roots {
