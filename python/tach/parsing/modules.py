@@ -4,12 +4,10 @@ from typing import TYPE_CHECKING
 
 from tach.core import ModuleTree
 from tach.errors import TachCircularDependencyError
-from tach.parsing import parse_interface_members
+from tach.extension import ModuleConfig, parse_interface_members
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from tach.core import ModuleConfig
 
 
 def find_duplicate_modules(modules: list[ModuleConfig]) -> list[str]:
@@ -81,9 +79,9 @@ def build_module_tree(
     for module in modules:
         tree.insert(
             config=module,
-            path=module.mod_path,
+            path=module.mod_path(),
             interface_members=parse_interface_members(
-                source_roots=source_roots, module_path=module.path
+                source_roots=source_roots, path=module.path
             ),
         )
     return tree

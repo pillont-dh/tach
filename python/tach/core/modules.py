@@ -4,7 +4,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Generator
 
-from tach.core.config import ModuleConfig, RootModuleConfig
+from tach.extension import ModuleConfig
 
 
 @dataclass
@@ -31,7 +31,7 @@ class ModuleNode:
 
     @classmethod
     def implicit_root(cls) -> ModuleNode:
-        config = RootModuleConfig()
+        config = ModuleConfig.new_root_config()
         return ModuleNode(is_end_of_path=True, full_path=".", config=config)
 
     def fill(
